@@ -8,8 +8,10 @@
 	import MetricsPanel from '$lib/components/MetricsPanel.svelte';
 	import Alert from '$lib/components/Alert.svelte';
 	import AlertModal from '$lib/components/AlertModal.svelte';
+	import ReportsPage from '$lib/components/ReportsPage.svelte'; // کامپوننت جدید برای تب دوم
 
-    // Modal State
+    // --- State for Tabs and Modal ---
+    let activeTab = 'dashboard'; // 'dashboard' or 'reports'
     let isModalOpen = false;
     let selectedAlert = null;
 
@@ -79,24 +81,54 @@
 	<main class="flex-1 flex flex-col gap-4">
 		<Header />
 
-		<!-- Chart and Metrics -->
-		<div class="flex-1 flex gap-4 overflow-hidden">
-			<div class="w-3/4 h-full bg-[#1A1F2D] rounded-lg p-2 shadow-lg">
-				<Chart />
-			</div>
-			<aside class="w-1/4 flex flex-col gap-4">
-				<MetricsPanel />
-			</aside>
-		</div>
+        <!-- Tabs Navigation -->
+        <div class="flex border-b border-gray-700">
+            <button
+                class="py-2 px-6 text-lg font-semibold transition-colors duration-300"
+                class:text-cyan-400={activeTab === 'dashboard'}
+                class:border-b-2={activeTab === 'dashboard'}
+                class:border-cyan-400={activeTab === 'dashboard'}
+                class:text-gray-400={activeTab !== 'dashboard'}
+                on:click={() => activeTab = 'dashboard'}
+            >
+                داشبورد اصلی
+            </button>
+            <button
+                class="py-2 px-6 text-lg font-semibold transition-colors duration-300"
+                class:text-cyan-400={activeTab === 'reports'}
+                class:border-b-2={activeTab === 'reports'}
+                class:border-cyan-400={activeTab === 'reports'}
+                class:text-gray-400={activeTab !== 'reports'}
+                on:click={() => activeTab = 'reports'}
+            >
+                گزارش‌ها
+            </button>
+        </div>
 
-		<!-- Live Alerts Feed -->
-		<div class="h-1/3 glass-effect rounded-lg p-4 flex flex-col">
-			<h2 class="text-lg font-bold text-white mb-2 border-b border-gray-600 pb-2 flex-shrink-0">فید هشدارهای زنده</h2>
-			<div class="flex-1 overflow-y-auto pr-2 space-y-2">
-				{#each $alerts as alert (alert.id)}
-					<Alert {alert} on:openModal={openModal} />
-				{/each}
-			</div>
-		</div>
+        <!-- Tab Content -->
+        {#if activeTab === 'dashboard'}
+            <!-- Original Dashboard Content -->
+            <div class="flex-1 flex gap-4 overflow-hidden">
+                <div class="w-3/4 h-full bg-[#1A1F2D] rounded-lg p-2 shadow-lg">
+                    <Chart />
+                </div>
+                <aside class="w-1/4 flex flex-col gap-4">
+                    <MetricsPanel />
+                </aside>
+            </div>
+            <div class="h-1/3 glass-effect rounded-lg p-4 flex flex-col">
+                <h2 class="text-lg font-bold text-white mb-2 border-b border-gray-600 pb-2 flex-shrink-0">فید هشدارهای زنده</h2>
+                <div class="flex-1 overflow-y-auto pr-2 space-y-2">
+                    <!-- {#each $alerts as alert (alert.id)} -->
+                    {#each $alerts as alert (alert.timestamp)}
+                        <Alert {alert} on:openModal={openModal} />
+                    {/each}
+                </div>
+            </div>
+        {:else if activeTab === 'reports'}
+            <!-- New Component for the second tab -->
+            <ReportsPage />
+        {/if}
+
 	</main>
 </div>
