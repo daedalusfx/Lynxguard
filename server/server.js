@@ -1,11 +1,12 @@
 // Propping Board - Backend Server
-// Version 5.0 - Live Data with WebSocket
-// وظیفه: دریافت، ذخیره‌سازی، تحلیل و ارسال زنده داده‌ها به داشبورد
-
+// Version 7.0 - Combined Analysis & Simulation Engines
+// وظیفه: اجرای دو موتور مجزا برای نظارت بر تخلفات و شبیه‌سازی معاملات مجازی
+// this version for git confilict
 const express = require('express');
 const mongoose = require('mongoose');
-const http = require('http'); // ماژول http برای یکپارچه‌سازی با WebSocket
-const { WebSocketServer } = require('ws'); // کتابخانه WebSocket
+const http = require('http');
+const { WebSocketServer } = require('ws');
+const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 // --- تنظیمات اصلی ---
@@ -13,55 +14,30 @@ const PORT = 5000;
 const MONGO_URI = `mongodb://${process.env.MONGO_USER}:${process.env.MONGO_PASS}@127.0.0.1:27017/propping_board_db_mongoose?authSource=admin`;
 const REFERENCE_SOURCE_ID = "reference_lmax";
 
-// --- تعریف Schema ها (بدون تغییر) ---
-const tickSchema = new mongoose.Schema({
-    sourceIdentifier: { type: String, required: true, index: true },
-    broker: { type: String, required: true },
-    accountNumber: { type: Number, required: true },
-    accountType: { type: String, required: true, enum: ['Demo', 'Real'] },
-    symbol: { type: String, required: true },
-    bid: { type: Number, required: true },
-    ask: { type: Number, required: true },
-    time_msc: { type: Number, required: true, index: true },
-    serverTimestamp: { type: Date, default: Date.now }
-});
-
-const alertSchema = new mongoose.Schema({
-    sourceIdentifier: { type: String, required: true, index: true },
-    alertType: { type: String, required: true },
-    severity: { type: String, required: true, enum: ['Info', 'Warning', 'Critical'] },
-    message: { type: String, required: true },
-    symbol: { type: String, required: true },
-    timestamp: { type: Date, default: Date.now },
-    snapshot: {
-        targetPrice: Number,
-        referencePrice: Number,
-        priceDifference: Number
-    }
-});
+// --- تعریف Schema ها ---
+const tickSchema = new mongoose.Schema({ sourceIdentifier: { type: String, required: true, index: true }, bid: Number, ask: Number, time_msc: {type: Number, index: true} });
+const alertSchema = new mongoose.Schema({ sourceIdentifier: { type: String, required: true, index: true }, alertType: { type: String, required: true }, severity: { type: String, required: true }, message: { type: String, required: true }, symbol: { type: String, required: true }, timestamp: { type: Date, default: Date.now }, snapshot: { targetPrice: Number, referencePrice: Number, priceDifference: Number } });
+const virtualTradeSchema = new mongoose.Schema({ traceID: { type: String, required: true, unique: true, default: () => uuidv4() }, symbol: { type: String, required: true }, tradeType: { type: String, required: true, enum: ['buy', 'sell'] }, status: { type: String, required: true, default: 'pending_entry' }, requestedEntry: { type: Number, required: true }, stopLoss: { type: Number, required: true }, takeProfit: { type: Number, required: true }, createdAt: { type: Date, default: Date.now }, results: [{ sourceIdentifier: String, status: { type: String, default: 'pending_entry' }, entryPrice: Number, closePrice: Number }] });
 
 // --- ساخت Model ها ---
 const Tick = mongoose.model('Tick', tickSchema);
 const Alert = mongoose.model('Alert', alertSchema);
+const VirtualTrade = mongoose.model('VirtualTrade', virtualTradeSchema);
 
-// --- راه‌اندازی Express و سرور HTTP ---
+// --- راه‌اندازی سرور ---
 const app = express();
-app.use(express.json({ limit: '10mb' }));
-const server = http.createServer(app); // ساخت سرور HTTP از روی Express
-
-// --- بخش جدید: راه‌اندازی سرور WebSocket ---
+app.use(express.json());
+const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+let latestTicks = {}; // کش در حافظه برای آخرین تیک هر منبع
+
 wss.on('connection', (ws) => {
-    console.log('✅ Dashboard client connected via WebSocket.');
+    console.log('✅ Dashboard client connected.');
+    ws.on('message', (message) => handleWebSocketMessage(message, ws));
     ws.on('close', () => console.log('❌ Dashboard client disconnected.'));
 });
 
-/**
- * @function broadcast
- * @description یک پیام را برای تمام کلاینت‌های متصل WebSocket ارسال می‌کند.
- * @param {object} data - داده‌ای که باید ارسال شود.
- */
 function broadcast(data) {
     const message = JSON.stringify(data);
     wss.clients.forEach((client) => {
@@ -71,106 +47,133 @@ function broadcast(data) {
     });
 }
 
-// --- موتور تحلیل چند-منبعی (بدون تغییر) ---
-// ... (کد موتور تحلیل از نسخه قبل در اینجا قرار می‌گیرد و بدون تغییر است)
-const ANALYSIS_INTERVAL = 5000;
-const TIME_WINDOW_SECONDS = 10;
-const PRICE_DEVIATION_THRESHOLD_PIPS = 2.0;
-async function analyzeTickData() {
+async function handleWebSocketMessage(message, ws) {
     try {
-        const timeWindow = new Date(Date.now() - TIME_WINDOW_SECONDS * 1000);
-        const recentTicks = await Tick.find({ serverTimestamp: { $gte: timeWindow } });
-        if (recentTicks.length < 2) return;
-        const referenceTicks = recentTicks.filter(t => t.sourceIdentifier === REFERENCE_SOURCE_ID);
-        if (referenceTicks.length === 0) return;
-        const lastReferenceTick = referenceTicks[referenceTicks.length - 1];
-        const targetTicksBySource = recentTicks.filter(t => t.sourceIdentifier !== REFERENCE_SOURCE_ID).reduce((acc, tick) => {
-            if (!acc[tick.sourceIdentifier]) acc[tick.sourceIdentifier] = [];
-            acc[tick.sourceIdentifier].push(tick);
-            return acc;
-        }, {});
-        for (const sourceId in targetTicksBySource) {
-            const targetTicks = targetTicksBySource[sourceId];
-            const lastTargetTick = targetTicks[targetTicks.length - 1];
-            const priceDifference = Math.abs(lastTargetTick.bid - lastReferenceTick.bid);
-            const pipsDifference = priceDifference / 0.0001;
-            if (pipsDifference > PRICE_DEVIATION_THRESHOLD_PIPS) {
-                const message = `اختلاف قیمت شدید ${pipsDifference.toFixed(2)} پیپ در منبع '${sourceId}' شناسایی شد.`;
-                const existingAlert = await Alert.findOne({
-                    sourceIdentifier: sourceId,
-                    alertType: 'Price_Deviation_Spike',
-                    timestamp: { $gte: new Date(Date.now() - 60000) }
-                });
-                if (!existingAlert) {
-                    console.log(`🚨 CRITICAL ANOMALY: ${message}`);
-                    const newAlert = new Alert({
-                        sourceIdentifier: sourceId,
-                        alertType: 'Price_Deviation_Spike',
-                        severity: 'Critical',
-                        message: message,
-                        symbol: lastTargetTick.symbol,
-                        snapshot: { targetPrice: lastTargetTick.bid, referencePrice: lastReferenceTick.bid, priceDifference: priceDifference }
-                    });
-                    await newAlert.save();
-                    broadcast({ type: 'new_alert', payload: newAlert }); // ارسال هشدار جدید به داشبورد
-                }
-            }
+        const data = JSON.parse(message);
+        if (data.type === 'create_virtual_trade') {
+            const newTrade = new VirtualTrade(data.payload);
+            await newTrade.save();
+            console.log(`✅ Virtual trade ${newTrade.traceID} saved.`);
+            ws.send(JSON.stringify({ type: 'virtual_trade_created', payload: newTrade }));
         }
     } catch (error) {
-        console.error("Error during analysis engine execution:", error);
+        console.error('Error handling WebSocket message:', error);
     }
 }
 
+// =================================================================
+//                      موتور تحلیل (ناظر)
+// =================================================================
+const ANALYSIS_INTERVAL = 5000;
+const PRICE_DEVIATION_THRESHOLD_PIPS = 2.0;
 
-// --- اندپوینت‌ها (API Endpoints) ---
+async function analysisEngine() {
+    const referenceTick = latestTicks[REFERENCE_SOURCE_ID];
+    if (!referenceTick) return; // بدون مرجع، تحلیلی ممکن نیست
 
-// اندپوینت /tick اکنون داده‌ها را به داشبورد نیز broadcast می‌کند
+    for (const sourceId in latestTicks) {
+        if (sourceId === REFERENCE_SOURCE_ID) continue;
+
+        const targetTick = latestTicks[sourceId];
+        const priceDifference = Math.abs(targetTick.bid - referenceTick.bid);
+        const pipsDifference = priceDifference / 0.0001;
+
+        if (pipsDifference > PRICE_DEVIATION_THRESHOLD_PIPS) {
+            const message = `اختلاف قیمت شدید ${pipsDifference.toFixed(2)} پیپ در منبع '${sourceId}' شناسایی شد.`;
+            console.log(`🚨 MONITOR: ${message}`);
+            
+            const newAlert = new Alert({
+                sourceIdentifier: sourceId,
+                alertType: 'Price_Deviation_Spike',
+                severity: 'Critical',
+                message: message,
+                symbol: targetTick.symbol,
+                snapshot: { targetPrice: targetTick.bid, referencePrice: referenceTick.bid, priceDifference: priceDifference }
+            });
+            await newAlert.save();
+            broadcast({ type: 'new_alert', payload: newAlert });
+        }
+    }
+}
+
+// =================================================================
+//                      موتور شبیه‌سازی
+// =================================================================
+const SIMULATION_INTERVAL = 2000;
+
+async function simulationEngine() {
+    const activeTrades = await VirtualTrade.find({ status: { $ne: 'closed' } });
+
+    for (const trade of activeTrades) {
+        let tradeUpdated = false;
+        const sources = Object.keys(latestTicks);
+        if (trade.results.length === 0) {
+            trade.results = sources.map(id => ({ sourceIdentifier: id, status: 'pending_entry' }));
+        }
+
+        for (const result of trade.results) {
+            if (result.status.includes('closed')) continue;
+            const tick = latestTicks[result.sourceIdentifier];
+            if (!tick) continue;
+
+            const price = trade.tradeType === 'buy' ? tick.ask : tick.bid;
+            const closePrice = trade.tradeType === 'buy' ? tick.bid : tick.ask;
+
+            if (result.status === 'pending_entry') {
+                if ((trade.tradeType === 'buy' && price >= trade.requestedEntry) || (trade.tradeType === 'sell' && price <= trade.requestedEntry)) {
+                    result.status = 'active';
+                    result.entryPrice = price;
+                    tradeUpdated = true;
+                }
+            } else if (result.status === 'active') {
+                if ((trade.tradeType === 'buy' && closePrice <= trade.stopLoss) || (trade.tradeType === 'sell' && closePrice >= trade.stopLoss)) {
+                    result.status = 'closed_sl';
+                    result.closePrice = trade.stopLoss;
+                    tradeUpdated = true;
+                } else if ((trade.tradeType === 'buy' && closePrice >= trade.takeProfit) || (trade.tradeType === 'sell' && closePrice <= trade.takeProfit)) {
+                    result.status = 'closed_tp';
+                    result.closePrice = trade.takeProfit;
+                    tradeUpdated = true;
+                }
+            }
+        }
+
+        if (trade.results.every(r => r.status.includes('closed'))) {
+            trade.status = 'closed';
+            tradeUpdated = true;
+        }
+        
+        if (tradeUpdated) {
+            await trade.save();
+            broadcast({ type: 'virtual_trade_update', payload: trade });
+        }
+    }
+}
+
+// --- اندپوینت‌ها و راه‌اندازی نهایی ---
 app.post('/tick', async (req, res) => {
-    // console.log(req.body);
-    
     try {
         const tickData = req.body;
         const newTick = new Tick(tickData);
         await newTick.save();
-        
-        // ارسال تیک جدید به تمام کلاینت‌های داشبورد
+        latestTicks[tickData.sourceIdentifier] = tickData;
         broadcast({ type: 'tick', payload: tickData });
-        
         res.status(201).json({ status: 'success' });
-    } catch (error) {
-        res.status(500).json({ status: 'error', message: 'Failed to save tick data.' });
-    }
+    } catch (error) { res.status(500).json({status: 'error'}) }
 });
 
-app.get('/api/alerts', async (req, res) => {
-    try {
-        const { source } = req.query;
-        let query = {};
-        if (source) {
-            query.sourceIdentifier = source;
-        }
-        const alerts = await Alert.find(query).sort({ timestamp: -1 }).limit(50);
-        res.status(200).json(alerts);
-    } catch (error) {
-        res.status(500).json({ status: 'error', message: 'Failed to fetch alerts.' });
-    }
-});
+app.get('/api/virtual-trades', async (req, res) => { /* ... */ });
+app.get('/api/alerts', async (req, res) => { /* ... */ });
 
-// --- راه‌اندازی سرور ---
 async function startServer() {
-    try {
-        await mongoose.connect(MONGO_URI);
-        console.log(`✅ Successfully connected to MongoDB via Mongoose.`);
-        
-        // به جای app.listen، از server.listen استفاده می‌کنیم
-        server.listen(PORT, () => {
-            console.log(`🚀 Propping Board Server (v5.0 with WebSocket) is running on http://localhost:${PORT}`);
-            setInterval(analyzeTickData, ANALYSIS_INTERVAL);
-        });
-    } catch (err) {
-        console.error("❌ Could not connect to MongoDB.", err.message);
-        process.exit(1);
-    }
+    await mongoose.connect(MONGO_URI);
+    console.log(`✅ Connected to MongoDB.`);
+    server.listen(PORT, () => {
+        console.log(`🚀 Server (v7.0 with Dual Engines) is running on http://localhost:${PORT}`);
+        // هر دو موتور را به صورت مستقل و با بازه‌های زمانی متفاوت فعال کن
+        setInterval(analysisEngine, ANALYSIS_INTERVAL);
+        setInterval(simulationEngine, SIMULATION_INTERVAL);
+    });
 }
 
 startServer();
