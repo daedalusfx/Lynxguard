@@ -1,142 +1,176 @@
 // Propping Board - Backend Server
-// Version 2.0 - Mongoose Architecture
-// وظیفه: دریافت داده از اکسپرت‌های MQL5 و ذخیره‌سازی در MongoDB با استفاده از Mongoose
+// Version 5.0 - Live Data with WebSocket
+// وظیفه: دریافت، ذخیره‌سازی، تحلیل و ارسال زنده داده‌ها به داشبورد
 
 const express = require('express');
 const mongoose = require('mongoose');
+const http = require('http'); // ماژول http برای یکپارچه‌سازی با WebSocket
+const { WebSocketServer } = require('ws'); // کتابخانه WebSocket
+require('dotenv').config();
 
 // --- تنظیمات اصلی ---
 const PORT = 5000;
-// const MONGO_URI = "mongodb://127.0.0.1:27017/mongodb"; // یک دیتابیس جدید برای نسخه Mongoose
-const MONGO_URI = "mongodb://testuser:mypass@127.0.0.1:27017/propping_board_db_mongoose?authSource=admin";
-// const MONGO_URI = "mongodb://admin:admin@127.0.0.1:27017/propping_board_db_mongoose?authSource=admin";
-// const db = 'mongodb+srv://admin:admin@127.0.0.1:27017/test?retryWrites=true'
+const MONGO_URI = `mongodb://${process.env.MONGO_USER}:${process.env.MONGO_PASS}@127.0.0.1:27017/propping_board_db_mongoose?authSource=admin`;
+const REFERENCE_SOURCE_ID = "reference_lmax";
 
-
-// --- تعریف Schema برای Mongoose ---
-
-// Schema برای داده‌های تیک (Tick Data)
+// --- تعریف Schema ها (بدون تغییر) ---
 const tickSchema = new mongoose.Schema({
-    source: { type: String, required: true, enum: ['target', 'reference'] }, // منبع باید یکی از این دو مقدار باشد
+    sourceIdentifier: { type: String, required: true, index: true },
     broker: { type: String, required: true },
+    accountNumber: { type: Number, required: true },
+    accountType: { type: String, required: true, enum: ['Demo', 'Real'] },
     symbol: { type: String, required: true },
     bid: { type: Number, required: true },
     ask: { type: Number, required: true },
-    time_msc: { type: Number, required: true },
-    serverTimestamp: { type: Date, default: Date.now } // زمان دریافت در سرور
-});
-
-// Schema برای داده‌های معاملات (Trade Data)
-const tradeSchema = new mongoose.Schema({
-    source: { type: String, default: 'target' },
-    broker: { type: String, required: true },
-    type: { type: String, required: true }, // نوع رویداد، مثلا DEAL_ADD
-    ticket: { type: Number, required: true, unique: true, index: true }, // تیکت معامله باید یکتا باشد
-    order_id: { type: Number, required: true },
-    symbol: { type: String, required: true },
-    volume: { type: Number },
-    price: { type: Number },
-    profit: { type: Number },
-    commission: { type: Number },
-    swap: { type: Number },
-    deal_type: { type: String },
+    time_msc: { type: Number, required: true, index: true },
     serverTimestamp: { type: Date, default: Date.now }
 });
 
-// --- ساخت Model از روی Schema ها ---
+const alertSchema = new mongoose.Schema({
+    sourceIdentifier: { type: String, required: true, index: true },
+    alertType: { type: String, required: true },
+    severity: { type: String, required: true, enum: ['Info', 'Warning', 'Critical'] },
+    message: { type: String, required: true },
+    symbol: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+    snapshot: {
+        targetPrice: Number,
+        referencePrice: Number,
+        priceDifference: Number
+    }
+});
+
+// --- ساخت Model ها ---
 const Tick = mongoose.model('Tick', tickSchema);
-const Trade = mongoose.model('Trade', tradeSchema);
+const Alert = mongoose.model('Alert', alertSchema);
 
-
-// --- راه‌اندازی برنامه Express ---
+// --- راه‌اندازی Express و سرور HTTP ---
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+const server = http.createServer(app); // ساخت سرور HTTP از روی Express
+
+// --- بخش جدید: راه‌اندازی سرور WebSocket ---
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws) => {
+    console.log('✅ Dashboard client connected via WebSocket.');
+    ws.on('close', () => console.log('❌ Dashboard client disconnected.'));
+});
 
 /**
- * @function connectToMongo
- * @description به پایگاه داده MongoDB با استفاده از Mongoose متصل می‌شود.
+ * @function broadcast
+ * @description یک پیام را برای تمام کلاینت‌های متصل WebSocket ارسال می‌کند.
+ * @param {object} data - داده‌ای که باید ارسال شود.
  */
-async function connectToMongo() {
+function broadcast(data) {
+    const message = JSON.stringify(data);
+    wss.clients.forEach((client) => {
+        if (client.readyState === 1) { // WebSocket.OPEN
+            client.send(message);
+        }
+    });
+}
+
+// --- موتور تحلیل چند-منبعی (بدون تغییر) ---
+// ... (کد موتور تحلیل از نسخه قبل در اینجا قرار می‌گیرد و بدون تغییر است)
+const ANALYSIS_INTERVAL = 5000;
+const TIME_WINDOW_SECONDS = 10;
+const PRICE_DEVIATION_THRESHOLD_PIPS = 2.0;
+async function analyzeTickData() {
     try {
-        await mongoose.connect(MONGO_URI).then((res)=>{
-            console.log(`✅ Successfully connected to MongoDB via Mongoose: `);
-            
-        })
-        // await mongoose.connect("mongodb://localhost:27017/propping_board_db", {
-        //     authSource: "admin",
-        //     user: "admin",
-        //     pass: "admin"
-        // }).then((res)=>{
-        //     console.log(res);
-            
-        // })
-    } catch (err) {
-        console.error("❌ Could not connect to MongoDB.", err);
-        process.exit(1);
+        const timeWindow = new Date(Date.now() - TIME_WINDOW_SECONDS * 1000);
+        const recentTicks = await Tick.find({ serverTimestamp: { $gte: timeWindow } });
+        if (recentTicks.length < 2) return;
+        const referenceTicks = recentTicks.filter(t => t.sourceIdentifier === REFERENCE_SOURCE_ID);
+        if (referenceTicks.length === 0) return;
+        const lastReferenceTick = referenceTicks[referenceTicks.length - 1];
+        const targetTicksBySource = recentTicks.filter(t => t.sourceIdentifier !== REFERENCE_SOURCE_ID).reduce((acc, tick) => {
+            if (!acc[tick.sourceIdentifier]) acc[tick.sourceIdentifier] = [];
+            acc[tick.sourceIdentifier].push(tick);
+            return acc;
+        }, {});
+        for (const sourceId in targetTicksBySource) {
+            const targetTicks = targetTicksBySource[sourceId];
+            const lastTargetTick = targetTicks[targetTicks.length - 1];
+            const priceDifference = Math.abs(lastTargetTick.bid - lastReferenceTick.bid);
+            const pipsDifference = priceDifference / 0.0001;
+            if (pipsDifference > PRICE_DEVIATION_THRESHOLD_PIPS) {
+                const message = `اختلاف قیمت شدید ${pipsDifference.toFixed(2)} پیپ در منبع '${sourceId}' شناسایی شد.`;
+                const existingAlert = await Alert.findOne({
+                    sourceIdentifier: sourceId,
+                    alertType: 'Price_Deviation_Spike',
+                    timestamp: { $gte: new Date(Date.now() - 60000) }
+                });
+                if (!existingAlert) {
+                    console.log(`🚨 CRITICAL ANOMALY: ${message}`);
+                    const newAlert = new Alert({
+                        sourceIdentifier: sourceId,
+                        alertType: 'Price_Deviation_Spike',
+                        severity: 'Critical',
+                        message: message,
+                        symbol: lastTargetTick.symbol,
+                        snapshot: { targetPrice: lastTargetTick.bid, referencePrice: lastReferenceTick.bid, priceDifference: priceDifference }
+                    });
+                    await newAlert.save();
+                    broadcast({ type: 'new_alert', payload: newAlert }); // ارسال هشدار جدید به داشبورد
+                }
+            }
+        }
+    } catch (error) {
+        console.error("Error during analysis engine execution:", error);
     }
 }
 
+
 // --- اندپوینت‌ها (API Endpoints) ---
 
-/**
- * @route POST /tick
- * @description دریافت داده‌های تیک و ذخیره با استفاده از مدل Tick.
- */
+// اندپوینت /tick اکنون داده‌ها را به داشبورد نیز broadcast می‌کند
 app.post('/tick', async (req, res) => {
-    console.log(req.body);
+    // console.log(req.body);
     
     try {
-        // ایجاد یک سند جدید بر اساس مدل Tick
-        const newTick = new Tick(req.body);
-        await newTick.save(); // ذخیره در دیتابیس
-        res.status(201).json({ status: 'success' }); // 201 یعنی Created
+        const tickData = req.body;
+        const newTick = new Tick(tickData);
+        await newTick.save();
+        
+        // ارسال تیک جدید به تمام کلاینت‌های داشبورد
+        broadcast({ type: 'tick', payload: tickData });
+        
+        res.status(201).json({ status: 'success' });
     } catch (error) {
-        // اگر داده ورودی با Schema مطابقت نداشته باشد، Mongoose خطا می‌دهد
-        if (error.name === 'ValidationError') {
-            console.error("Validation Error:", error.message);
-            return res.status(400).json({ status: 'error', message: error.message });
-        }
-        console.error("Error inserting tick data:", error);
         res.status(500).json({ status: 'error', message: 'Failed to save tick data.' });
     }
 });
 
-/**
- * @route POST /trade
- * @description دریافت رویدادهای معاملاتی و ذخیره/آپدیت با استفاده از مدل Trade.
- */
-app.post('/trade', async (req, res) => {
-    const tradeData = req.body;
-    if (!tradeData.ticket) {
-        return res.status(400).json({ status: 'error', message: 'Trade ticket is required.' });
-    }
-
+app.get('/api/alerts', async (req, res) => {
     try {
-        // پیدا کردن معامله بر اساس تیکت و آپدیت آن. اگر وجود نداشت، یک سند جدید می‌سازد (upsert: true)
-        await Trade.findOneAndUpdate(
-            { ticket: tradeData.ticket }, // شرط پیدا کردن
-            tradeData,                      // داده‌های جدید برای آپدیت
-            { upsert: true, new: true, runValidators: true } // گزینه‌ها
-        );
-        console.log(`Trade event [${tradeData.type}] processed for ticket: ${tradeData.ticket}`);
-        res.status(200).json({ status: 'success' });
-    } catch (error) {
-        if (error.name === 'ValidationError') {
-            console.error("Validation Error:", error.message);
-            return res.status(400).json({ status: 'error', message: error.message });
+        const { source } = req.query;
+        let query = {};
+        if (source) {
+            query.sourceIdentifier = source;
         }
-        console.error("Error processing trade data:", error);
-        res.status(500).json({ status: 'error', message: 'Failed to save trade data.' });
+        const alerts = await Alert.find(query).sort({ timestamp: -1 }).limit(50);
+        res.status(200).json(alerts);
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: 'Failed to fetch alerts.' });
     }
 });
 
-
 // --- راه‌اندازی سرور ---
 async function startServer() {
-    await connectToMongo(); // ابتدا به دیتابیس متصل شو
-    app.listen(PORT, () => {
-        console.log(`🚀 Propping Board Server (Mongoose) is running on http://localhost:${PORT}`);
-    });
+    try {
+        await mongoose.connect(MONGO_URI);
+        console.log(`✅ Successfully connected to MongoDB via Mongoose.`);
+        
+        // به جای app.listen، از server.listen استفاده می‌کنیم
+        server.listen(PORT, () => {
+            console.log(`🚀 Propping Board Server (v5.0 with WebSocket) is running on http://localhost:${PORT}`);
+            setInterval(analyzeTickData, ANALYSIS_INTERVAL);
+        });
+    } catch (err) {
+        console.error("❌ Could not connect to MongoDB.", err.message);
+        process.exit(1);
+    }
 }
 
 startServer();
