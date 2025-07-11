@@ -25,7 +25,7 @@
 		"vite-plugin-devtools-json": "^0.2.0"
 	},
 	"dependencies": {
-		"lightweight-charts": "^5.0.8",
+		"lightweight-charts": "4.1.0",
 		"lucide-svelte": "^0.525.0"
 	}
 }
