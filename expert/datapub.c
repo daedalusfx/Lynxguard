@@ -57,8 +57,9 @@ void OnTick()
     SendData(server_url_ticks, payload);
 }
 
-// سایر توابع مانند OnTradeTransaction و SendData بدون تغییر باقی می‌مانند...
-
+//+------------------------------------------------------------------+
+//| Trade Transaction function (مهم: ثبت رویدادهای معاملاتی)         |
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 //| تابع کمکی برای ارسال داده به سرور                               |
 //+------------------------------------------------------------------+
@@ -77,4 +78,52 @@ void SendData(const string &url, const string &payload)
     {
         Print("Error in WebRequest: ", GetLastError());
     }
+}
+
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+    const MqlTradeRequest &request,
+    const MqlTradeResult &result)
+{
+//--- این تابع فقط برای اکسپرتی که روی بروکر "هدف" است باید کار کند
+if(source_type != "target")
+{
+return;
+}
+
+//--- ما فقط به معاملاتی که به تاریخچه اضافه می‌شوند (اجرا شده) علاقه‌مندیم
+if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+{
+//--- دریافت اطلاعات معامله (Deal) از طریق تیکت آن
+ulong deal_ticket = trans.deal;
+if(HistoryDealSelect(deal_ticket))
+{
+long deal_order_id = HistoryDealGetInteger(deal_ticket, DEAL_ORDER);
+string deal_symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
+double deal_volume = HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
+double deal_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+double deal_profit = HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);
+double deal_commission = HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION);
+double deal_swap = HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
+ENUM_DEAL_TYPE deal_type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
+
+//--- ساخت پِی‌لود JSON برای رویداد معامله
+string payload = StringFormat("{\"source\":\"target\", \"broker\":\"%s\", \"type\":\"DEAL_ADD\", \"ticket\":%llu, \"order_id\":%llu, \"symbol\":\"%s\", \"volume\":%.2f, \"price\":%.5f, \"profit\":%.2f, \"commission\":%.2f, \"swap\":%.2f, \"deal_type\":\"%s\"}",
+                      g_broker_name,
+                      deal_ticket,
+                      deal_order_id,
+                      deal_symbol,
+                      deal_volume,
+                      deal_price,
+                      deal_profit,
+                      deal_commission,
+                      deal_swap,
+                      EnumToString(deal_type)
+                      );
+
+//--- ارسال داده به اندپوینت معاملات
+SendData(server_url_trades, payload);
+Print("Trade event sent for ticket: ", deal_ticket);
+}
+}
 }

@@ -1,12 +1,11 @@
 // Propping Board - Backend Server
-// Version 7.0 - Combined Analysis & Simulation Engines
-// وظیفه: اجرای دو موتور مجزا برای نظارت بر تخلفات و شبیه‌سازی معاملات مجازی
-// this version for git confilict
+// Version 7.3 - Added Initial Chart Reset Signal
 const express = require('express');
 const mongoose = require('mongoose');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
+const cors = require('cors');
 require('dotenv').config();
 
 // --- تنظیمات اصلی ---
@@ -15,9 +14,41 @@ const MONGO_URI = `mongodb://${process.env.MONGO_USER}:${process.env.MONGO_PASS}
 const REFERENCE_SOURCE_ID = "reference_lmax";
 
 // --- تعریف Schema ها ---
-const tickSchema = new mongoose.Schema({ sourceIdentifier: { type: String, required: true, index: true }, bid: Number, ask: Number, time_msc: {type: Number, index: true} });
-const alertSchema = new mongoose.Schema({ sourceIdentifier: { type: String, required: true, index: true }, alertType: { type: String, required: true }, severity: { type: String, required: true }, message: { type: String, required: true }, symbol: { type: String, required: true }, timestamp: { type: Date, default: Date.now }, snapshot: { targetPrice: Number, referencePrice: Number, priceDifference: Number } });
-const virtualTradeSchema = new mongoose.Schema({ traceID: { type: String, required: true, unique: true, default: () => uuidv4() }, symbol: { type: String, required: true }, tradeType: { type: String, required: true, enum: ['buy', 'sell'] }, status: { type: String, required: true, default: 'pending_entry' }, requestedEntry: { type: Number, required: true }, stopLoss: { type: Number, required: true }, takeProfit: { type: Number, required: true }, createdAt: { type: Date, default: Date.now }, results: [{ sourceIdentifier: String, status: { type: String, default: 'pending_entry' }, entryPrice: Number, closePrice: Number }] });
+const tickSchema = new mongoose.Schema({
+    sourceIdentifier: { type: String, required: true, index: true },
+    broker: String,
+    accountNumber: Number,
+    accountType: String,
+    symbol: String,
+    bid: Number,
+    ask: Number,
+    time_msc: { type: Number, index: true }
+});
+const alertSchema = new mongoose.Schema({
+    sourceIdentifier: { type: String, required: true, index: true },
+    alertType: { type: String, required: true },
+    severity: { type: String, required: true },
+    message: { type: String, required: true },
+    symbol: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+    snapshot: { targetPrice: Number, referencePrice: Number, priceDifference: Number }
+});
+const virtualTradeSchema = new mongoose.Schema({
+    traceID: { type: String, required: true, unique: true, default: () => uuidv4() },
+    symbol: { type: String, required: true },
+    tradeType: { type: String, required: true, enum: ['buy', 'sell'] },
+    status: { type: String, required: true, default: 'pending_entry' },
+    requestedEntry: { type: Number, required: true },
+    stopLoss: { type: Number, required: true },
+    takeProfit: { type: Number, required: true },
+    createdAt: { type: Date, default: Date.now },
+    results: [{
+        sourceIdentifier: String,
+        status: { type: String, default: 'pending_entry' },
+        entryPrice: Number,
+        closePrice: Number
+    }]
+});
 
 // --- ساخت Model ها ---
 const Tick = mongoose.model('Tick', tickSchema);
@@ -26,17 +57,30 @@ const VirtualTrade = mongoose.model('VirtualTrade', virtualTradeSchema);
 
 // --- راه‌اندازی سرور ---
 const app = express();
+app.use(cors());
 app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 let latestTicks = {}; // کش در حافظه برای آخرین تیک هر منبع
 
+// ✅ *** تغییر اصلی اینجاست ***
 wss.on('connection', (ws) => {
     console.log('✅ Dashboard client connected.');
+
+    // ارسال سیگنال اولیه برای راه‌اندازی چارت در کلاینت
+    // این پیام به کلاینت می‌گوید که تاریخچه چارت را برای نماد و دوره زمانی پیش‌فرض درخواست کند
+    ws.send(JSON.stringify({
+        type: 'chart_reset',
+        symbol: 'BITCOIN', // نماد پیش‌فرض
+        period: '1m',       // دوره زمانی پیش‌فرض
+        sourceIdentifier: REFERENCE_SOURCE_ID
+    }));
+
     ws.on('message', (message) => handleWebSocketMessage(message, ws));
     ws.on('close', () => console.log('❌ Dashboard client disconnected.'));
 });
+
 
 function broadcast(data) {
     const message = JSON.stringify(data);
@@ -69,7 +113,7 @@ const PRICE_DEVIATION_THRESHOLD_PIPS = 2.0;
 
 async function analysisEngine() {
     const referenceTick = latestTicks[REFERENCE_SOURCE_ID];
-    if (!referenceTick) return; // بدون مرجع، تحلیلی ممکن نیست
+    if (!referenceTick) return;
 
     for (const sourceId in latestTicks) {
         if (sourceId === REFERENCE_SOURCE_ID) continue;
@@ -81,7 +125,7 @@ async function analysisEngine() {
         if (pipsDifference > PRICE_DEVIATION_THRESHOLD_PIPS) {
             const message = `اختلاف قیمت شدید ${pipsDifference.toFixed(2)} پیپ در منبع '${sourceId}' شناسایی شد.`;
             console.log(`🚨 MONITOR: ${message}`);
-            
+
             const newAlert = new Alert({
                 sourceIdentifier: sourceId,
                 alertType: 'Price_Deviation_Spike',
@@ -142,13 +186,14 @@ async function simulationEngine() {
             trade.status = 'closed';
             tradeUpdated = true;
         }
-        
+
         if (tradeUpdated) {
             await trade.save();
             broadcast({ type: 'virtual_trade_update', payload: trade });
         }
     }
 }
+
 
 // --- اندپوینت‌ها و راه‌اندازی نهایی ---
 app.post('/tick', async (req, res) => {
@@ -162,18 +207,70 @@ app.post('/tick', async (req, res) => {
     } catch (error) { res.status(500).json({status: 'error'}) }
 });
 
-app.get('/api/virtual-trades', async (req, res) => { /* ... */ });
-app.get('/api/alerts', async (req, res) => { /* ... */ });
+app.get('/history', async (req, res) => {
+    const { symbol, period, sourceIdentifier } = req.query;
+    if (!symbol || !period || !sourceIdentifier) {
+        return res.status(400).json({ error: 'Symbol, period, and sourceIdentifier are required.' });
+    }
+
+    const ONE_MINUTE_MS = 60 * 1000;
+    const HISTORY_LIMIT = 500;
+
+    try {
+        const candles = await Tick.aggregate([
+            { $match: { symbol: symbol, sourceIdentifier: sourceIdentifier } },
+            { $sort: { time_msc: -1 } },
+            { $limit: HISTORY_LIMIT * 100 },
+            {
+                $group: {
+                    _id: { $toLong: { $subtract: ["$time_msc", { $mod: ["$time_msc", ONE_MINUTE_MS] }] } },
+                    open: { $last: "$bid" },
+                    high: { $max: "$bid" },
+                    low: { $min: "$bid" },
+                    close: { $first: "$bid" }
+                }
+            },
+            { $sort: { _id: 1 } },
+            {
+                $project: {
+                    _id: 0,
+                    time: { $divide: ["$_id", 1000] },
+                    open: "$open",
+                    high: "$high",
+                    low: "$low",
+                    close: "$close"
+                }
+            }
+        ]);
+
+        res.json({ type: 'history_data', data: candles });
+
+    } catch (error) {
+        console.error("Error fetching history:", error);
+        res.status(500).json({ error: 'Failed to fetch chart history.' });
+    }
+});
+app.get('/api/alerts', async (req, res) => {
+    try {
+        const alerts = await Alert.find().sort({ timestamp: -1 }).limit(50);
+        res.json(alerts);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch alerts.' });
+    }
+});
 
 async function startServer() {
-    await mongoose.connect(MONGO_URI);
-    console.log(`✅ Connected to MongoDB.`);
-    server.listen(PORT, () => {
-        console.log(`🚀 Server (v7.0 with Dual Engines) is running on http://localhost:${PORT}`);
-        // هر دو موتور را به صورت مستقل و با بازه‌های زمانی متفاوت فعال کن
-        setInterval(analysisEngine, ANALYSIS_INTERVAL);
-        setInterval(simulationEngine, SIMULATION_INTERVAL);
-    });
+    try {
+        await mongoose.connect(MONGO_URI);
+        console.log(`✅ Connected to MongoDB.`);
+        server.listen(PORT, () => {
+            console.log(`🚀 Server (v7.3 with Dual Engines) is running on http://localhost:${PORT}`);
+            setInterval(analysisEngine, ANALYSIS_INTERVAL);
+            setInterval(simulationEngine, SIMULATION_INTERVAL);
+        });
+    } catch (error) {
+        console.error("Failed to start server:", error);
+    }
 }
 
 startServer();

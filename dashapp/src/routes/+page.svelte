@@ -9,6 +9,7 @@
 	import Alert from '$lib/components/Alert.svelte';
 	import AlertModal from '$lib/components/AlertModal.svelte';
 	import ReportsPage from '$lib/components/ReportsPage.svelte'; // کامپوننت جدید برای تب دوم
+	import TradeSimulatorPage from '$lib/components/TradeSimulatorPage.svelte';
 
     // --- State for Tabs and Modal ---
     let activeTab = 'dashboard'; // 'dashboard' or 'reports'
@@ -127,7 +128,7 @@
             </div>
         {:else if activeTab === 'reports'}
             <!-- New Component for the second tab -->
-            <ReportsPage />
+            <TradeSimulatorPage />
         {/if}
 
 	</main>
