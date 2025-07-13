@@ -1,4 +1,4 @@
-// Propping Board - Backend Server
+//Lynx Gurd - Backend Server
 // Version 7.0 - Combined Analysis & Simulation Engines
 // وظیفه: اجرای دو موتور مجزا برای نظارت بر تخلفات و شبیه‌سازی معاملات مجازی
 
