@@ -9,7 +9,7 @@
 	import Alert from '$lib/components/Alert.svelte';
 	import AlertModal from '$lib/components/AlertModal.svelte';
 	import ReportsPage from '$lib/components/ReportsPage.svelte'; // کامپوننت جدید برای تب دوم
-	import TradeSimulatorPage from '$lib/components/TradeSimulatorPage.svelte';
+	// import TradeSimulatorPage from '$lib/components/TradeSimulator/TradeSimulatorPage.svelte';
 
     // --- State for Tabs and Modal ---
     let activeTab = 'dashboard'; // 'dashboard' or 'reports'
@@ -82,32 +82,7 @@
 	<main class="flex-1 flex flex-col gap-4">
 		<Header />
 
-        <!-- Tabs Navigation -->
-        <div class="flex border-b border-gray-700">
-            <button
-                class="py-2 px-6 text-lg font-semibold transition-colors duration-300"
-                class:text-cyan-400={activeTab === 'dashboard'}
-                class:border-b-2={activeTab === 'dashboard'}
-                class:border-cyan-400={activeTab === 'dashboard'}
-                class:text-gray-400={activeTab !== 'dashboard'}
-                on:click={() => activeTab = 'dashboard'}
-            >
-                داشبورد اصلی
-            </button>
-            <button
-                class="py-2 px-6 text-lg font-semibold transition-colors duration-300"
-                class:text-cyan-400={activeTab === 'reports'}
-                class:border-b-2={activeTab === 'reports'}
-                class:border-cyan-400={activeTab === 'reports'}
-                class:text-gray-400={activeTab !== 'reports'}
-                on:click={() => activeTab = 'reports'}
-            >
-                گزارش‌ها
-            </button>
-        </div>
-
         <!-- Tab Content -->
-        {#if activeTab === 'dashboard'}
             <!-- Original Dashboard Content -->
             <div class="flex-1 flex gap-4 overflow-hidden">
                 <div class="w-3/4 h-full bg-[#1A1F2D] rounded-lg p-2 shadow-lg">
@@ -126,10 +101,6 @@
                     {/each}
                 </div>
             </div>
-        {:else if activeTab === 'reports'}
-            <!-- New Component for the second tab -->
-            <TradeSimulatorPage />
-        {/if}
-
+ 
 	</main>
 </div>
