@@ -8,7 +8,7 @@
 	<div class="flex items-center gap-3">
 		<ShieldCheck class="text-cyan-400 w-8 h-8" />
 		<div>
-			<h1 class="text-2xl font-bold text-white">داشبورد نظارتی Propping Board</h1>
+			<h1 class="text-2xl font-bold text-white">داشبورد نظارتیLynx Gurd</h1>
 			{#if $connectionStatus.status === 'connected'}
 				<p class="text-sm text-green-400">{$connectionStatus.message}</p>
 			{:else if $connectionStatus.status === 'disconnected' || $connectionStatus.status === 'error'}
