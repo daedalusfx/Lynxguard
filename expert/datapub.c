@@ -1,129 +1,181 @@
 //+------------------------------------------------------------------+
-//|                                           ProppingBoardEA.mq5    |
-//|                      Copyright 2024, Gemini & Your Name          |
-//|         (Data Collector for Multi-Source Comparison)             |
+//|     ProppingBoard - Unified Expert (Live Ticks + History + UI) |
 //+------------------------------------------------------------------+
-#property copyright "Gemini & Your Name"
-#property version   "2.0"
 #property strict
+#property version   "1.0"
+#property copyright "Gemini & You"
 
-//--- ورودی‌های اکسپرت (مهم‌ترین بخش برای تنظیم)
-input string source_identifier  = "target_demo_alphaprop"; // شناسه منحصر به فرد این منبع داده (مثال: target_real_alphaprop, reference_lmax)
-input string server_url_ticks = "http://127.0.0.1:5000/tick";
-input string server_url_trades= "http://127.0.0.1:5000/trade";
+//--- ورودی‌های قابل تنظیم
+input string source_identifier  = "reference_lmax";
+input string source_type        = "reference";  // target یا reference
+input string server_url_ticks   = "http://127.0.0.1:5000/tick";
+input string server_url_data    = "http://127.0.0.1:5000/data";
+input int    bars_to_send       = 500;
 
-//--- متغیرهای گلوبال
+//--- متغیرهای داخلی
 string g_broker_name;
 long   g_account_number;
 bool   g_is_demo_account;
+ENUM_TIMEFRAMES g_current_period;
+bool g_is_sending = false;
 
-//+------------------------------------------------------------------+
-//| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
     g_broker_name = AccountInfoString(ACCOUNT_COMPANY);
     g_account_number = AccountInfoInteger(ACCOUNT_LOGIN);
     g_is_demo_account = (AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_DEMO);
-    
-    PrintFormat("Propping Board EA Initialized. Source ID: '%s', Broker: '%s', Account: %d (%s)", 
-                source_identifier, 
-                g_broker_name, 
-                g_account_number, 
-                g_is_demo_account ? "Demo" : "Real");
-                
+
+    Print("✅ Merged Expert Initialized");
+    g_current_period = _Period;
+
+    // ابتدا ارسال تاریخچه و سپس ریست چارت
+    SendHistoricalData(bars_to_send);
+    SendResetSignal();
+
+    EventSetTimer(1);
     return(INIT_SUCCEEDED);
 }
-
 //+------------------------------------------------------------------+
-//| Expert tick function (ارسال قیمت لحظه‌ای)                        |
+void OnDeinit(const int reason)
+{
+    Print("🛑 Merged Expert Deinitialized");
+    EventKillTimer();
+}
+//+------------------------------------------------------------------+
+//| TICK: ارسال قیمت لحظه‌ای و آخرین کندل                          |
 //+------------------------------------------------------------------+
 void OnTick()
 {
     MqlTick latest_tick;
-    if(!SymbolInfoTick(_Symbol, latest_tick)) return;
+    if (SymbolInfoTick(_Symbol, latest_tick))
+    {
+        string payload = StringFormat(
+            "{\"sourceIdentifier\":\"%s\",\"broker\":\"%s\",\"accountNumber\":%d,\"accountType\":\"%s\",\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,\"time_msc\":%llu}",
+            source_identifier,
+            g_broker_name,
+            g_account_number,
+            g_is_demo_account ? "Demo" : "Real",
+            _Symbol,
+            latest_tick.bid,
+            latest_tick.ask,
+            latest_tick.time_msc
+        );
+        SendData(server_url_ticks, payload);
+    }
 
-    //--- ساخت پِی‌لود JSON با فیلدهای جدید
-    string payload = StringFormat("{\"sourceIdentifier\":\"%s\", \"broker\":\"%s\", \"accountNumber\":%d, \"accountType\":\"%s\", \"symbol\":\"%s\", \"bid\":%.5f, \"ask\":%.5f, \"time_msc\":%llu}",
-                                  source_identifier,
-                                  g_broker_name,
-                                  g_account_number,
-                                  g_is_demo_account ? "Demo" : "Real",
-                                  _Symbol,
-                                  latest_tick.bid,
-                                  latest_tick.ask,
-                                  latest_tick.time_msc);
-
-    SendData(server_url_ticks, payload);
+    // همچنین آخرین کندل رو به صورت update_data بفرست
+    MqlRates rates[1];
+    if (CopyRates(_Symbol, _Period, 0, 1, rates) > 0)
+    {
+        string payload2 = StringFormat(
+            "{\"symbol\":\"%s\",\"period\":\"%s\",\"type\":\"update_data\",\"data\":{\"time\":%d,\"open\":%s,\"high\":%s,\"low\":%s,\"close\":%s}}",
+            _Symbol,
+            EnumToString(_Period),
+            rates[0].time,
+            PriceToString(rates[0].open),
+            PriceToString(rates[0].high),
+            PriceToString(rates[0].low),
+            PriceToString(rates[0].close)
+        );
+        SendData(server_url_data, payload2);
+    }
 }
+//+------------------------------------------------------------------+
+//| TIMER: بررسی تغییر تایم‌فریم یا ارسال مجدد تاریخچه             |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+    if (_Period != g_current_period)
+    {
+        g_current_period = _Period;
+        Print("🔁 Period changed: ", EnumToString(g_current_period));
+        SendHistoricalData(bars_to_send);
+        SendResetSignal();
+    }
+}
+//+------------------------------------------------------------------+
+//| ارسال تاریخچه قیمت                                              |
+//+------------------------------------------------------------------+
+void SendHistoricalData(int bar_count)
+{
+    MqlRates rates[];
+    ArraySetAsSeries(rates, true);
+    int copied = CopyRates(_Symbol, _Period, 0, bar_count, rates);
 
+    if (copied > 0)
+    {
+        string json_array = "[";
+        for (int i = copied - 1; i >= 0; i--)
+        {
+            json_array += StringFormat(
+                "{\"time\":%d,\"open\":%s,\"high\":%s,\"low\":%s,\"close\":%s}",
+                rates[i].time,
+                PriceToString(rates[i].open),
+                PriceToString(rates[i].high),
+                PriceToString(rates[i].low),
+                PriceToString(rates[i].close)
+            );
+            if (i > 0) json_array += ",";
+        }
+        json_array += "]";
+
+        string payload = StringFormat(
+            "{\"symbol\":\"%s\",\"period\":\"%s\",\"type\":\"history_data\",\"data\":%s}",
+            _Symbol,
+            EnumToString(_Period),
+            json_array
+        );
+
+        SendData(server_url_data, payload);
+        Print("📤 Sent ", copied, " bars of historical data.");
+    }
+    else
+    {
+        Print("⚠️ CopyRates failed: ", GetLastError());
+    }
+}
 //+------------------------------------------------------------------+
-//| Trade Transaction function (مهم: ثبت رویدادهای معاملاتی)         |
+//| ارسال سیگنال chart_reset برای UI                                |
 //+------------------------------------------------------------------+
+void SendResetSignal()
+{
+    string payload = StringFormat(
+        "{\"symbol\":\"%s\",\"type\":\"chart_reset\",\"period\":\"%s\"}",
+        _Symbol,
+        EnumToString(_Period)
+    );
+
+    SendData(server_url_data, payload);
+    Print("📨 chart_reset sent.");
+}
 //+------------------------------------------------------------------+
-//| تابع کمکی برای ارسال داده به سرور                               |
+//| ارسال داده به سرور (POST WebRequest)                            |
 //+------------------------------------------------------------------+
 void SendData(const string &url, const string &payload)
 {
+    if (g_is_sending) return;
+    g_is_sending = true;
+
     char post_data[];
     char result_data[];
     string result_headers;
-    
-    int data_len = StringToCharArray(payload, post_data, 0, WHOLE_ARRAY, CP_UTF8);
-    ArrayResize(post_data, data_len - 1);
 
-    int res = WebRequest("POST", url, "Content-Type: application/json; charset=utf-8", 5000, post_data, result_data, result_headers);
-    
-    if(res == -1)
-    {
-        Print("Error in WebRequest: ", GetLastError());
-    }
+    int len = StringToCharArray(payload, post_data, 0, WHOLE_ARRAY, CP_UTF8);
+    if (len > 0 && post_data[len - 1] == 0)
+        ArrayResize(post_data, len - 1);
+
+    int res = WebRequest("POST", url,
+                         "Content-Type: application/json; charset=utf-8",
+                         5000, post_data, result_data, result_headers);
+
+    if (res == -1)
+        Print("❌ WebRequest failed: ", GetLastError());
+
+    g_is_sending = false;
 }
-
-
-void OnTradeTransaction(const MqlTradeTransaction &trans,
-    const MqlTradeRequest &request,
-    const MqlTradeResult &result)
+//+------------------------------------------------------------------+
+string PriceToString(double price)
 {
-//--- این تابع فقط برای اکسپرتی که روی بروکر "هدف" است باید کار کند
-if(source_type != "target")
-{
-return;
-}
-
-//--- ما فقط به معاملاتی که به تاریخچه اضافه می‌شوند (اجرا شده) علاقه‌مندیم
-if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
-{
-//--- دریافت اطلاعات معامله (Deal) از طریق تیکت آن
-ulong deal_ticket = trans.deal;
-if(HistoryDealSelect(deal_ticket))
-{
-long deal_order_id = HistoryDealGetInteger(deal_ticket, DEAL_ORDER);
-string deal_symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
-double deal_volume = HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
-double deal_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
-double deal_profit = HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);
-double deal_commission = HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION);
-double deal_swap = HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
-ENUM_DEAL_TYPE deal_type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
-
-//--- ساخت پِی‌لود JSON برای رویداد معامله
-string payload = StringFormat("{\"source\":\"target\", \"broker\":\"%s\", \"type\":\"DEAL_ADD\", \"ticket\":%llu, \"order_id\":%llu, \"symbol\":\"%s\", \"volume\":%.2f, \"price\":%.5f, \"profit\":%.2f, \"commission\":%.2f, \"swap\":%.2f, \"deal_type\":\"%s\"}",
-                      g_broker_name,
-                      deal_ticket,
-                      deal_order_id,
-                      deal_symbol,
-                      deal_volume,
-                      deal_price,
-                      deal_profit,
-                      deal_commission,
-                      deal_swap,
-                      EnumToString(deal_type)
-                      );
-
-//--- ارسال داده به اندپوینت معاملات
-SendData(server_url_trades, payload);
-Print("Trade event sent for ticket: ", deal_ticket);
-}
-}
+    return DoubleToString(price, (int)_Digits);
 }
